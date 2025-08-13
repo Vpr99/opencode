@@ -42,9 +42,37 @@ export namespace LSPServer {
 
   export const Typescript: Info = {
     id: "typescript",
-    root: NearestRoot(["tsconfig.json", "package.json", "jsconfig.json"]),
+    root: async (file, app) => {
+      return NearestRoot(["tsconfig.json", "package.json", "jsconfig.json", "deno.json", "deno.jsonc"])(file, app)
+    },
     extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
     async spawn(app, root) {
+      const isDenoProject =
+        (await Bun.file(path.join(root, "deno.json")).exists()) ||
+        (await Bun.file(path.join(root, "deno.jsonc")).exists()) ||
+        (await Bun.file(path.join(root, "deno.lock")).exists())
+      if (isDenoProject) {
+        const denoBin = Bun.which("deno")
+        if (!denoBin) {
+          log.error("Deno is not installed. Please install Deno to use Deno LSP")
+          return
+        }
+
+        const proc = spawn(denoBin, ["lsp"], {
+          cwd: root,
+          env: { ...process.env },
+        })
+
+        return {
+          process: proc,
+          initialization: {
+            enable: true,
+            unstable: true,
+            lint: true,
+          },
+        }
+      }
+
       const tsserver = await Bun.resolve("typescript/lib/tsserver.js", app.path.cwd).catch(() => {})
       if (!tsserver) return
       const proc = spawn(BunProc.which(), ["x", "typescript-language-server", "--stdio"], {
