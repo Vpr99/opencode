@@ -42,9 +42,7 @@ export namespace LSPServer {
 
   export const Typescript: Info = {
     id: "typescript",
-    root: async (file, app) => {
-      return NearestRoot(["tsconfig.json", "package.json", "jsconfig.json", "deno.json", "deno.jsonc"])(file, app)
-    },
+    root: NearestRoot(["tsconfig.json", "package.json", "jsconfig.json", "deno.json", "deno.jsonc"]),
     extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
     async spawn(app, root) {
       const isDenoProject =
