@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss/v2"
@@ -39,6 +40,7 @@ type MessagesComponent interface {
 	CopyLastMessage() (tea.Model, tea.Cmd)
 	UndoLastMessage() (tea.Model, tea.Cmd)
 	RedoLastMessage() (tea.Model, tea.Cmd)
+	ScrollToMessage(messageID string) (tea.Model, tea.Cmd)
 }
 
 type messagesComponent struct {
@@ -57,6 +59,8 @@ type messagesComponent struct {
 	partCount          int
 	lineCount          int
 	selection          *selection
+	messagePositions   map[string]int // map message ID to line position
+	animating          bool
 }
 
 type selection struct {
@@ -97,6 +101,7 @@ func (s selection) coords(offset int) *selection {
 
 type ToggleToolDetailsMsg struct{}
 type ToggleThinkingBlocksMsg struct{}
+type shimmerTickMsg struct{}
 
 func (m *messagesComponent) Init() tea.Cmd {
 	return tea.Batch(m.viewport.Init())
@@ -105,6 +110,15 @@ func (m *messagesComponent) Init() tea.Cmd {
 func (m *messagesComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
+	case shimmerTickMsg:
+		if !m.app.HasAnimatingWork() {
+			m.animating = false
+			return m, nil
+		}
+		return m, tea.Sequence(
+			m.renderView(),
+			tea.Tick(90*time.Millisecond, func(t time.Time) tea.Msg { return shimmerTickMsg{} }),
+		)
 	case tea.MouseClickMsg:
 		slog.Info("mouse", "x", msg.X, "y", msg.Y, "offset", m.viewport.YOffset)
 		y := msg.Y + m.viewport.YOffset
@@ -132,15 +146,18 @@ func (m *messagesComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseReleaseMsg:
-		if m.selection != nil && len(m.clipboard) > 0 {
-			content := strings.Join(m.clipboard, "\n")
+		if m.selection != nil {
 			m.selection = nil
-			m.clipboard = []string{}
-			return m, tea.Sequence(
-				m.renderView(),
-				app.SetClipboard(content),
-				toast.NewSuccessToast("Copied to clipboard"),
-			)
+			if len(m.clipboard) > 0 {
+				content := strings.Join(m.clipboard, "\n")
+				m.clipboard = []string{}
+				return m, tea.Sequence(
+					m.renderView(),
+					app.SetClipboard(content),
+					toast.NewSuccessToast("Copied to clipboard"),
+				)
+			}
+			return m, m.renderView()
 		}
 	case tea.WindowSizeMsg:
 		effectiveWidth := msg.Width - 4
@@ -169,7 +186,11 @@ func (m *messagesComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showThinkingBlocks = !m.showThinkingBlocks
 		m.app.State.ShowThinkingBlocks = &m.showThinkingBlocks
 		return m, tea.Batch(m.renderView(), m.app.SaveState())
-	case app.SessionLoadedMsg, app.SessionClearedMsg:
+	case app.SessionLoadedMsg:
+		m.tail = true
+		m.loading = true
+		return m, m.renderView()
+	case app.SessionClearedMsg:
 		m.cache.Clear()
 		m.tail = true
 		m.loading = true
@@ -180,6 +201,23 @@ func (m *messagesComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tail = true
 			return m, m.renderView()
 		}
+	case app.SessionSelectedMsg:
+		currentParent := m.app.Session.ParentID
+		if currentParent == "" {
+			currentParent = m.app.Session.ID
+		}
+
+		targetParent := msg.ParentID
+		if targetParent == "" {
+			targetParent = msg.ID
+		}
+
+		// Clear cache only if switching between different session families
+		if currentParent != targetParent {
+			m.cache.Clear()
+		}
+
+		m.viewport.GotoBottom()
 	case app.MessageRevertedMsg:
 		if msg.Session.ID == m.app.Session.ID {
 			m.cache.Clear()
@@ -203,6 +241,11 @@ func (m *messagesComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Properties.Part.SessionID == m.app.Session.ID {
 			cmds = append(cmds, m.renderView())
 		}
+	case opencode.EventListResponseEventMessageRemoved:
+		if msg.Properties.SessionID == m.app.Session.ID {
+			m.cache.Clear()
+			cmds = append(cmds, m.renderView())
+		}
 	case opencode.EventListResponseEventMessagePartRemoved:
 		if msg.Properties.SessionID == m.app.Session.ID {
 			// Clear the cache when a part is removed to ensure proper re-rendering
@@ -221,6 +264,7 @@ func (m *messagesComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rendering = false
 		m.clipboard = msg.clipboard
 		m.loading = false
+		m.messagePositions = msg.messagePositions
 		m.tail = m.viewport.AtBottom()
 
 		// Preserve scroll across reflow
@@ -238,6 +282,12 @@ func (m *messagesComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.dirty {
 			cmds = append(cmds, m.renderView())
 		}
+
+		// Start shimmer ticks if any assistant/tool is in-flight
+		if !m.animating && m.app.HasAnimatingWork() {
+			m.animating = true
+			cmds = append(cmds, tea.Tick(90*time.Millisecond, func(t time.Time) tea.Msg { return shimmerTickMsg{} }))
+		}
 	}
 
 	m.tail = m.viewport.AtBottom()
@@ -249,11 +299,12 @@ func (m *messagesComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 type renderCompleteMsg struct {
-	viewport  viewport.Model
-	clipboard []string
-	header    string
-	partCount int
-	lineCount int
+	viewport         viewport.Model
+	clipboard        []string
+	header           string
+	partCount        int
+	lineCount        int
+	messagePositions map[string]int
 }
 
 func (m *messagesComponent) renderView() tea.Cmd {
@@ -279,6 +330,7 @@ func (m *messagesComponent) renderView() tea.Cmd {
 		blocks := make([]string, 0)
 		partCount := 0
 		lineCount := 0
+		messagePositions := make(map[string]int) // Track message ID to line position
 
 		orphanedToolCalls := make([]opencode.ToolPart, 0)
 
@@ -301,6 +353,9 @@ func (m *messagesComponent) renderView() tea.Cmd {
 
 			switch casted := message.Info.(type) {
 			case opencode.UserMessage:
+				// Track the position of this user message
+				messagePositions[casted.ID] = lineCount
+
 				if casted.ID == m.app.Session.Revert.MessageID {
 					reverted = true
 					revertedMessageCount = 1
@@ -368,10 +423,8 @@ func (m *messagesComponent) renderView() tea.Cmd {
 						)
 
 						author := m.app.Config.Username
-						if casted.ID > lastAssistantMessage {
-							author += " [queued]"
-						}
-						key := m.cache.GenerateKey(casted.ID, part.Text, width, files, author)
+						isQueued := casted.ID > lastAssistantMessage
+						key := m.cache.GenerateKey(casted.ID, part.Text, width, files, author, isQueued)
 						content, cached = m.cache.Get(key)
 						if !cached {
 							content = renderText(
@@ -383,6 +436,7 @@ func (m *messagesComponent) renderView() tea.Cmd {
 								width,
 								files,
 								false,
+								isQueued,
 								fileParts,
 								agentParts,
 							)
@@ -458,6 +512,7 @@ func (m *messagesComponent) renderView() tea.Cmd {
 									width,
 									"",
 									false,
+									false,
 									[]opencode.FilePart{},
 									[]opencode.AgentPart{},
 									toolCallParts...,
@@ -473,6 +528,7 @@ func (m *messagesComponent) renderView() tea.Cmd {
 								m.showToolDetails,
 								width,
 								"",
+								false,
 								false,
 								[]opencode.FilePart{},
 								[]opencode.AgentPart{},
@@ -553,6 +609,7 @@ func (m *messagesComponent) renderView() tea.Cmd {
 								width,
 								"",
 								true,
+								false,
 								[]opencode.FilePart{},
 								[]opencode.AgentPart{},
 							)
@@ -585,6 +642,7 @@ func (m *messagesComponent) renderView() tea.Cmd {
 						m.showToolDetails,
 						width,
 						"",
+						false,
 						false,
 						[]opencode.FilePart{},
 						[]opencode.AgentPart{},
@@ -757,11 +815,12 @@ func (m *messagesComponent) renderView() tea.Cmd {
 		}
 
 		return renderCompleteMsg{
-			header:    header,
-			clipboard: clipboard,
-			viewport:  viewport,
-			partCount: partCount,
-			lineCount: lineCount,
+			header:           header,
+			clipboard:        clipboard,
+			viewport:         viewport,
+			partCount:        partCount,
+			lineCount:        lineCount,
+			messagePositions: messagePositions,
 		}
 	}
 }
@@ -774,8 +833,17 @@ func (m *messagesComponent) renderHeader() string {
 	headerWidth := m.width
 
 	t := theme.CurrentTheme()
-	base := styles.NewStyle().Foreground(t.Text()).Background(t.Background()).Render
-	muted := styles.NewStyle().Foreground(t.TextMuted()).Background(t.Background()).Render
+	bgColor := t.Background()
+	borderColor := t.BackgroundElement()
+
+	isChildSession := m.app.Session.ParentID != ""
+	if isChildSession {
+		bgColor = t.BackgroundElement()
+		borderColor = t.Accent()
+	}
+
+	base := styles.NewStyle().Foreground(t.Text()).Background(bgColor).Render
+	muted := styles.NewStyle().Foreground(t.TextMuted()).Background(bgColor).Render
 
 	sessionInfo := ""
 	tokens := float64(0)
@@ -807,20 +875,44 @@ func (m *messagesComponent) renderHeader() string {
 	sessionInfoText := formatTokensAndCost(tokens, contextWindow, cost, isSubscriptionModel)
 	sessionInfo = styles.NewStyle().
 		Foreground(t.TextMuted()).
-		Background(t.Background()).
+		Background(bgColor).
 		Render(sessionInfoText)
 
 	shareEnabled := m.app.Config.Share != opencode.ConfigShareDisabled
+
+	navHint := ""
+	if isChildSession {
+		navHint = base(" "+m.app.Keybind(commands.SessionChildCycleReverseCommand)) + muted(" back")
+	}
+
 	headerTextWidth := headerWidth
-	if !shareEnabled {
-		// +1 is to ensure there is always at least one space between header and session info
-		headerTextWidth -= len(sessionInfoText) + 1
+	if isChildSession {
+		headerTextWidth -= lipgloss.Width(navHint)
+	} else if !shareEnabled {
+		headerTextWidth -= lipgloss.Width(sessionInfoText)
 	}
 	headerText := util.ToMarkdown(
 		"# "+m.app.Session.Title,
 		headerTextWidth,
-		t.Background(),
+		bgColor,
 	)
+	if isChildSession {
+		headerText = layout.Render(
+			layout.FlexOptions{
+				Background: &bgColor,
+				Direction:  layout.Row,
+				Justify:    layout.JustifySpaceBetween,
+				Align:      layout.AlignStretch,
+				Width:      headerTextWidth,
+			},
+			layout.FlexItem{
+				View: headerText,
+			},
+			layout.FlexItem{
+				View: navHint,
+			},
+		)
+	}
 
 	var items []layout.FlexItem
 	if shareEnabled {
@@ -833,10 +925,9 @@ func (m *messagesComponent) renderHeader() string {
 		items = []layout.FlexItem{{View: headerText}, {View: sessionInfo}}
 	}
 
-	background := t.Background()
 	headerRow := layout.Render(
 		layout.FlexOptions{
-			Background: &background,
+			Background: &bgColor,
 			Direction:  layout.Row,
 			Justify:    layout.JustifySpaceBetween,
 			Align:      layout.AlignStretch,
@@ -852,14 +943,14 @@ func (m *messagesComponent) renderHeader() string {
 
 	header := strings.Join(headerLines, "\n")
 	header = styles.NewStyle().
-		Background(t.Background()).
+		Background(bgColor).
 		Width(headerWidth).
 		PaddingLeft(2).
 		PaddingRight(2).
 		BorderLeft(true).
 		BorderRight(true).
 		BorderBackground(t.Background()).
-		BorderForeground(t.BackgroundElement()).
+		BorderForeground(borderColor).
 		BorderStyle(lipgloss.ThickBorder()).
 		Render(header)
 
@@ -906,7 +997,7 @@ func formatTokensAndCost(
 
 	formattedCost := fmt.Sprintf("$%.2f", cost)
 	return fmt.Sprintf(
-		"%s/%d%% (%s)",
+		" %s/%d%% (%s)",
 		formattedTokens,
 		int(percentage),
 		formattedCost,
@@ -915,20 +1006,22 @@ func formatTokensAndCost(
 
 func (m *messagesComponent) View() string {
 	t := theme.CurrentTheme()
+	bgColor := t.Background()
+
 	if m.loading {
 		return lipgloss.Place(
 			m.width,
 			m.height,
 			lipgloss.Center,
 			lipgloss.Center,
-			styles.NewStyle().Background(t.Background()).Render(""),
-			styles.WhitespaceStyle(t.Background()),
+			styles.NewStyle().Background(bgColor).Render(""),
+			styles.WhitespaceStyle(bgColor),
 		)
 	}
 
 	viewport := m.viewport.View()
 	return styles.NewStyle().
-		Background(t.Background()).
+		Background(bgColor).
 		Render(m.header + "\n" + viewport)
 }
 
@@ -1146,12 +1239,24 @@ func (m *messagesComponent) RedoLastMessage() (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m *messagesComponent) ScrollToMessage(messageID string) (tea.Model, tea.Cmd) {
+	if m.messagePositions == nil {
+		return m, nil
+	}
+
+	if position, exists := m.messagePositions[messageID]; exists {
+		m.viewport.SetYOffset(position)
+		m.tail = false // Stop auto-scrolling to bottom when manually navigating
+	}
+	return m, nil
+}
+
 func NewMessagesComponent(app *app.App) MessagesComponent {
 	vp := viewport.New()
 	vp.KeyMap = viewport.KeyMap{}
 
-	if app.State.ScrollSpeed != nil && *app.State.ScrollSpeed > 0 {
-		vp.MouseWheelDelta = *app.State.ScrollSpeed
+	if app.ScrollSpeed > 0 {
+		vp.MouseWheelDelta = app.ScrollSpeed
 	} else {
 		vp.MouseWheelDelta = 2
 	}
@@ -1174,5 +1279,6 @@ func NewMessagesComponent(app *app.App) MessagesComponent {
 		showThinkingBlocks: showThinkingBlocks,
 		cache:              NewPartCache(),
 		tail:               true,
+		messagePositions:   make(map[string]int),
 	}
 }
