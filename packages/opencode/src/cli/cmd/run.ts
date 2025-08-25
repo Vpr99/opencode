@@ -67,11 +67,17 @@ export const RunCommand = cmd({
     await bootstrap({ cwd: process.cwd() }, async () => {
       const session = await (async () => {
         if (args.continue) {
-          const list = Session.list()
-          const first = await list.next()
-          await list.return()
-          if (first.done) return
-          return first.value
+          const it = Session.list()
+          try {
+            for await (const s of it) {
+              if (s.parentID === undefined) {
+                return s
+              }
+            }
+            return
+          } finally {
+            await it.return()
+          }
         }
 
         if (args.session) return Session.get(args.session)
@@ -165,12 +171,8 @@ export const RunCommand = cmd({
       const result = await Session.chat({
         sessionID: session.id,
         messageID,
-        ...(agent.model
-          ? agent.model
-          : {
-              providerID,
-              modelID,
-            }),
+        providerID,
+        modelID,
         agent: agent.name,
         parts: [
           {
