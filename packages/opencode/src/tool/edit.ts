@@ -10,11 +10,11 @@ import { LSP } from "../lsp"
 import { createTwoFilesPatch } from "diff"
 import { Permission } from "../permission"
 import DESCRIPTION from "./edit.txt"
-import { App } from "../app/app"
 import { File } from "../file"
 import { Bus } from "../bus"
 import { FileTime } from "../file/time"
 import { Filesystem } from "../util/filesystem"
+import { Instance } from "../project/instance"
 import { Agent } from "../agent/agent"
 
 export const EditTool = Tool.define("edit", {
@@ -34,9 +34,8 @@ export const EditTool = Tool.define("edit", {
       throw new Error("oldString and newString must be different")
     }
 
-    const app = App.info()
-    const filePath = path.isAbsolute(params.filePath) ? params.filePath : path.join(app.path.cwd, params.filePath)
-    if (!Filesystem.contains(app.path.cwd, filePath)) {
+    const filePath = path.isAbsolute(params.filePath) ? params.filePath : path.join(Instance.directory, params.filePath)
+    if (!Filesystem.contains(Instance.directory, filePath)) {
       throw new Error(`File ${filePath} is not in the current working directory`)
     }
 
@@ -108,14 +107,12 @@ export const EditTool = Tool.define("edit", {
     for (const [file, issues] of Object.entries(diagnostics)) {
       if (issues.length === 0) continue
       if (file === filePath) {
-        output += `\nThis file has errors, please fix\n<file_diagnostics>\n${issues.map(LSP.Diagnostic.pretty).join("\n")}\n</file_diagnostics>\n`
+        output += `\nThis file has errors, please fix\n<file_diagnostics>\n${issues
+          .filter((item) => item.severity === 1)
+          .map(LSP.Diagnostic.pretty)
+          .join("\n")}\n</file_diagnostics>\n`
         continue
       }
-      output += `\n<project_diagnostics>\n${file}\n${issues
-        // TODO: may want to make more leniant for eslint
-        .filter((item) => item.severity === 1)
-        .map(LSP.Diagnostic.pretty)
-        .join("\n")}\n</project_diagnostics>\n`
     }
 
     return {
@@ -123,7 +120,7 @@ export const EditTool = Tool.define("edit", {
         diagnostics,
         diff,
       },
-      title: `${path.relative(app.path.root, filePath)}`,
+      title: `${path.relative(Instance.worktree, filePath)}`,
       output,
     }
   },
@@ -595,10 +592,12 @@ export function replace(content: string, oldString: string, newString: string, r
     throw new Error("oldString and newString must be different")
   }
 
+  let notFound = true
+
   for (const replacer of [
     SimpleReplacer,
     LineTrimmedReplacer,
-    BlockAnchorReplacer,
+    // BlockAnchorReplacer,
     WhitespaceNormalizedReplacer,
     IndentationFlexibleReplacer,
     EscapeNormalizedReplacer,
@@ -609,6 +608,7 @@ export function replace(content: string, oldString: string, newString: string, r
     for (const search of replacer(content, oldString)) {
       const index = content.indexOf(search)
       if (index === -1) continue
+      notFound = false
       if (replaceAll) {
         return content.replaceAll(search, newString)
       }
@@ -617,5 +617,11 @@ export function replace(content: string, oldString: string, newString: string, r
       return content.substring(0, index) + newString + content.substring(index + search.length)
     }
   }
-  throw new Error("oldString not found in content or was found multiple times")
+
+  if (notFound) {
+    throw new Error("oldString not found in content")
+  }
+  throw new Error(
+    "oldString found multiple times and requires more code context to uniquely identify the intended match",
+  )
 }

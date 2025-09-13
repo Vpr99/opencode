@@ -1,8 +1,8 @@
-import { bigint, boolean, integer, pgTable, varchar } from "drizzle-orm/pg-core"
+import { bigint, boolean, int, mysqlTable, varchar, json } from "drizzle-orm/mysql-core"
 import { timestamps, workspaceColumns } from "../drizzle/types"
 import { workspaceIndexes } from "./workspace.sql"
 
-export const BillingTable = pgTable(
+export const BillingTable = mysqlTable(
   "billing",
   {
     ...workspaceColumns,
@@ -16,7 +16,7 @@ export const BillingTable = pgTable(
   (table) => [...workspaceIndexes(table)],
 )
 
-export const PaymentTable = pgTable(
+export const PaymentTable = mysqlTable(
   "payment",
   {
     ...workspaceColumns,
@@ -28,17 +28,19 @@ export const PaymentTable = pgTable(
   (table) => [...workspaceIndexes(table)],
 )
 
-export const UsageTable = pgTable(
+export const UsageTable = mysqlTable(
   "usage",
   {
     ...workspaceColumns,
     ...timestamps,
     model: varchar("model", { length: 255 }).notNull(),
-    inputTokens: integer("input_tokens").notNull(),
-    outputTokens: integer("output_tokens").notNull(),
-    reasoningTokens: integer("reasoning_tokens"),
-    cacheReadTokens: integer("cache_read_tokens"),
-    cacheWriteTokens: integer("cache_write_tokens"),
+    provider: varchar("provider", { length: 255 }).notNull(),
+    inputTokens: int("input_tokens").notNull(),
+    outputTokens: int("output_tokens").notNull(),
+    reasoningTokens: int("reasoning_tokens"),
+    cacheReadTokens: int("cache_read_tokens"),
+    cacheWrite5mTokens: int("cache_write_5m_tokens"),
+    cacheWrite1hTokens: int("cache_write_1h_tokens"),
     cost: bigint("cost", { mode: "number" }).notNull(),
   },
   (table) => [...workspaceIndexes(table)],

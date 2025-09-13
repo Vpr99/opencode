@@ -1,9 +1,9 @@
-import { App } from "../app/app"
 import { z } from "zod"
 import { Bus } from "../bus"
 import { Log } from "../util/log"
 import { Identifier } from "../id/id"
 import { Plugin } from "../plugin"
+import { Instance } from "../project/instance"
 
 export namespace Permission {
   const log = Log.create({ service: "permission" })
@@ -35,8 +35,7 @@ export namespace Permission {
     ),
   }
 
-  const state = App.state(
-    "permission",
+  const state = Instance.state(
     () => {
       const pending: {
         [sessionID: string]: {
@@ -84,7 +83,7 @@ export namespace Permission {
       toolCallID: input.callID,
       pattern: input.pattern,
     })
-    if (approved[input.sessionID]?.[input.pattern ?? input.type]) return
+    if (approved[input.sessionID]?.[input.type]) return
     const info: Info = {
       id: Identifier.ascending("permission"),
       type: input.type,
@@ -142,9 +141,9 @@ export namespace Permission {
     })
     if (input.response === "always") {
       approved[input.sessionID] = approved[input.sessionID] || {}
-      approved[input.sessionID][match.info.pattern ?? match.info.type] = true
+      approved[input.sessionID][match.info.type] = true
       for (const item of Object.values(pending[input.sessionID])) {
-        if ((item.info.pattern ?? item.info.type) === (match.info.pattern ?? match.info.type)) {
+        if (item.info.type === match.info.type) {
           respond({ sessionID: item.info.sessionID, permissionID: item.info.id, response: input.response })
         }
       }
